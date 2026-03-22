@@ -16,8 +16,8 @@ from sklearn.preprocessing import LabelEncoder
 # CONFIG
 # =============================================================================
 
-EDF_PATH    = "/Users/audaodoantruc/Downloads/IU-MIBCI_4class/G1/F11_A.edf"
-MARKER_PATH = "/Users/audaodoantruc/Downloads/IU-MIBCI_4class/G1/F11_A_intervalMarker.csv"
+EDF_PATH    = "/Users/audaodoantruc/Downloads/IU-MIBCI_4class/data/G1/F11_A.edf"
+MARKER_PATH = "/Users/audaodoantruc/Downloads/IU-MIBCI_4class/data/G1/F11_A_intervalMarker.csv"
 OUTPUT_DIR  = "/Users/audaodoantruc/Downloads/IU-MIBCI_4class/output/"
 
 EEG_CHANNELS = [
@@ -32,14 +32,19 @@ CLASS_LABELS_RAW = ['Tay phải', 'Tay trái', 'Chân phải', 'Chân trái']
 EVENT_ID         = {'Tay phải': 0, 'Tay trái': 1, 'Chân phải': 2, 'Chân trái': 3}
 
 # 3 class sau khi gộp Chân phải + Chân trái → "Chân"
-CLASS_LABELS     = ['Tay phải', 'Tay trái', 'Chân']
-MERGE_LEGS       = {'Chân': ['Chân phải', 'Chân trái']}   # các class cần gộp
+CLASS_LABELS = ['Tay phải', 'Tay trái', 'Chân']
+MERGE_LEGS   = {'Chân': ['Chân phải', 'Chân trái']}
 
-EPOCH_TMIN   = -0.5
-EPOCH_TMAX   =  3.0
-MVAR_ORDER   = 5
-ALPHA_BAND   = (8, 13)
-TOP_PERCENT  = 0.20
+# ✅ SỬA: Theo timeline thực tế
+# Marker t=0 → gợi ý t=2s → tiếng chuông + bắt đầu MI t=4s → hết trial t=8s
+# → Lấy epoch từ t=3.5s (0.5s trước chuông làm baseline) đến t=8s
+EPOCH_TMIN  = 3.5    # 0.5s trước tiếng chuông
+EPOCH_TMAX  = 8.0    # hết 4s MI
+BASELINE    = (3.5, 4.0)   # 0.5s trước chuông
+
+MVAR_ORDER  = 5
+ALPHA_BAND  = (8, 13)
+TOP_PERCENT = 0.20
 
 
 # =============================================================================
@@ -78,9 +83,9 @@ def load_and_preprocess(edf_path, eeg_channels):
 
 def plot_eeg(raw_clean):
     """Vẽ tất cả EEG channels theo thời gian."""
-    data = raw_clean.get_data()
+    data  = raw_clean.get_data()
     sfreq = raw_clean.info['sfreq']
-    time = np.arange(data.shape[1]) / sfreq
+    time  = np.arange(data.shape[1]) / sfreq
 
     plt.figure(figsize=(14, 10))
     for i, ch in enumerate(raw_clean.ch_names):
@@ -107,7 +112,7 @@ def load_markers(marker_path):
 
 def create_epochs(raw_clean, marker_df, event_id, tmin, tmax):
     """Tạo epochs từ marker MI."""
-    sfreq = raw_clean.info['sfreq']
+    sfreq      = raw_clean.info['sfreq']
     mi_markers = marker_df[marker_df['type'] == 'MI'].copy()
 
     events = []
@@ -116,10 +121,13 @@ def create_epochs(raw_clean, marker_df, event_id, tmin, tmax):
         events.append([onset_sample, 0, row['marker_value']])
     events = np.array(events)
 
+    # ✅ SỬA: baseline = 0.5s trước tiếng chuông (t=3.5 → t=4.0)
     epochs = mne.Epochs(
         raw_clean, events, event_id=event_id,
         tmin=tmin, tmax=tmax,
-        preload=True, baseline=(None, 0), verbose=False
+        preload=True,
+        baseline=BASELINE,   # ← sửa từ (None, 0)
+        verbose=False
     )
     print("Number of epochs:", len(epochs))
     return epochs
@@ -222,7 +230,7 @@ def compute_dtf(A_matrices, fs=128, n_freqs=200):
         except np.linalg.LinAlgError:
             Hf = np.linalg.inv(Af + 1e-8 * np.eye(n))
 
-        H2 = np.abs(Hf) ** 2
+        H2    = np.abs(Hf) ** 2
         denom = np.sum(H2, axis=0, keepdims=True)
         denom[denom == 0] = 1e-16
         dtf[:, :, fi] = H2 / denom
@@ -232,8 +240,8 @@ def compute_dtf(A_matrices, fs=128, n_freqs=200):
 
 def apply_threshold(weighted_matrix, top_percent=0.05):
     """Giữ top X% connections mạnh nhất → binary matrix."""
-    mat  = weighted_matrix.copy()
-    flat = mat[~np.eye(mat.shape[0], dtype=bool)]
+    mat   = weighted_matrix.copy()
+    flat  = mat[~np.eye(mat.shape[0], dtype=bool)]
     threshold_val = np.percentile(flat, (1 - top_percent) * 100)
     binary = (mat >= threshold_val).astype(int)
     np.fill_diagonal(binary, 0)
@@ -247,14 +255,14 @@ def process_class_connectivity(epochs_class, class_name, channel_names, fs,
     Lưu CSV + vẽ heatmap.
     """
     print(f"\n===== PROCESSING CLASS: {class_name} =====")
-    data = epochs_class.get_data()           # (n_epochs, n_channels, n_times)
-    eeg  = data.reshape(-1, data.shape[1]).T # ghép epochs → (n_channels, n_samples)
+    data = epochs_class.get_data()            # (n_epochs, n_channels, n_times)
+    eeg  = data.reshape(-1, data.shape[1]).T  # ghép epochs → (n_channels, n_samples)
     print("Merged EEG shape:", eeg.shape)
 
     A, _ = estimate_mvar_yw(eeg, order=order)
     freqs, dtf = compute_dtf(A, fs=fs)
 
-    alpha_idx = np.where((freqs >= alpha_band[0]) & (freqs <= alpha_band[1]))[0]
+    alpha_idx       = np.where((freqs >= alpha_band[0]) & (freqs <= alpha_band[1]))[0]
     weighted_matrix = np.mean(dtf[:, :, alpha_idx], axis=2)
     np.fill_diagonal(weighted_matrix, 0)
 
@@ -288,12 +296,9 @@ def compute_graph_metrics(binary_matrix, channel_names):
     G = nx.relabel_nodes(G, {i: ch for i, ch in enumerate(channel_names)})
     G_und = G.to_undirected()
 
-    # Node Strength: tổng số cạnh kết nối (với binary matrix = Degree,
-    # giữ riêng để dễ thay bằng weighted matrix sau này)
     node_strength = {ch: float(np.sum(binary_matrix[i]))
                      for i, ch in enumerate(channel_names)}
 
-    # Local Efficiency: tính trên subgraph của từng node
     local_eff = {n: nx.local_efficiency(G_und.subgraph(
                      list(G_und.neighbors(n)) + [n]))
                  for n in G_und.nodes()}
@@ -311,13 +316,12 @@ def compute_graph_metrics(binary_matrix, channel_names):
 
 
 def plot_metrics(metrics, channel_names, class_name, output_dir=""):
-    """Vẽ bar chart: Degree, Clustering, Local Efficiency, Node Strength.
-       Global Efficiency là scalar nên hiển thị trên title."""
+    """Vẽ bar chart: Degree, Clustering, Local Efficiency, Node Strength."""
     bar_items = [
-        ("Degree",           "Degree",                "steelblue"),
-        ("Clustering",       "Clustering Coefficient","darkorange"),
-        ("Local_Efficiency", "Local Efficiency",      "seagreen"),
-        ("Node_Strength",    "Node Strength",         "mediumpurple"),
+        ("Degree",           "Degree",                 "steelblue"),
+        ("Clustering",       "Clustering Coefficient", "darkorange"),
+        ("Local_Efficiency", "Local Efficiency",       "seagreen"),
+        ("Node_Strength",    "Node Strength",          "mediumpurple"),
     ]
 
     fig, axes = plt.subplots(len(bar_items), 1, figsize=(13, 14))
@@ -348,7 +352,7 @@ def plot_network(G, metrics, class_name, output_dir=""):
     pos = nx.circular_layout(G)
 
     node_size  = [metrics["Degree"][n] * 80 + 100 for n in G.nodes()]
-    node_color = [metrics["Node_Strength"][n] for n in G.nodes()]
+    node_color = [metrics["Node_Strength"][n]      for n in G.nodes()]
 
     nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_size,
                            node_color=node_color, cmap=plt.cm.YlOrRd, alpha=0.9)
@@ -375,11 +379,11 @@ def save_metrics_csv(metrics, channel_names, class_name, output_dir=""):
     """Lưu graph metrics ra CSV."""
     df = pd.DataFrame({
         "Channel"         : channel_names,
-        "Degree"          : [metrics["Degree"][ch]          for ch in channel_names],
-        "In_Degree"       : [metrics["In-Degree"][ch]       for ch in channel_names],
-        "Out_Degree"      : [metrics["Out-Degree"][ch]      for ch in channel_names],
-        "Node_Strength"   : [metrics["Node_Strength"][ch]   for ch in channel_names],
-        "Clustering"      : [metrics["Clustering"][ch]      for ch in channel_names],
+        "Degree"          : [metrics["Degree"][ch]           for ch in channel_names],
+        "In_Degree"       : [metrics["In-Degree"][ch]        for ch in channel_names],
+        "Out_Degree"      : [metrics["Out-Degree"][ch]       for ch in channel_names],
+        "Node_Strength"   : [metrics["Node_Strength"][ch]    for ch in channel_names],
+        "Clustering"      : [metrics["Clustering"][ch]       for ch in channel_names],
         "Local_Efficiency": [metrics["Local_Efficiency"][ch] for ch in channel_names],
     })
     csv_name = f"{output_dir}graph_metrics_{class_name.replace(' ', '_')}.csv"
@@ -390,7 +394,7 @@ def save_metrics_csv(metrics, channel_names, class_name, output_dir=""):
 
 
 def run_graph_pipeline(results, class_labels, channel_names, output_dir=""):
-    """Chạy toàn bộ graph pipeline cho 4 class."""
+    """Chạy toàn bộ graph pipeline cho các class."""
     graph_results = {}
 
     for label in class_labels:
@@ -400,23 +404,22 @@ def run_graph_pipeline(results, class_labels, channel_names, output_dir=""):
         binary_matrix, thr_val = apply_threshold(weighted_matrix, top_percent=TOP_PERCENT)
         print(f"  Threshold value: {thr_val:.6f} | Edges kept: {binary_matrix.sum()}")
 
-        # Lưu binary matrix
         bin_csv = f"{output_dir}dTF_alpha_{label.replace(' ', '_')}_binary_top20.csv"
         pd.DataFrame(binary_matrix, index=channel_names, columns=channel_names)\
           .to_csv(bin_csv)
         print(f"  Saved binary: {bin_csv}")
 
-        G, metrics = compute_graph_metrics(binary_matrix, channel_names)
+        G, metrics  = compute_graph_metrics(binary_matrix, channel_names)
         plot_metrics(metrics, channel_names, label, output_dir)
         plot_network(G, metrics, label, output_dir)
-        df_metrics = save_metrics_csv(metrics, channel_names, label, output_dir)
+        df_metrics  = save_metrics_csv(metrics, channel_names, label, output_dir)
 
         graph_results[label] = {
             "G": G, "metrics": metrics,
             "binary": binary_matrix, "df": df_metrics,
         }
 
-    print("\n✅ Hoàn tất pipeline: MVAR → dTF → Graph Theory cho 4 lớp.")
+    print("\n✅ Hoàn tất pipeline: MVAR → dTF → Graph Theory.")
     return graph_results
 
 
@@ -446,13 +449,13 @@ def extract_features_single_epoch(X, order=5, fs=128, top_percent=0.20):
     G     = nx.from_numpy_array(binary, create_using=nx.DiGraph)
     G_und = G.to_undirected()
 
-    degree       = np.array([d for _, d in G.degree()])
-    in_degree    = np.array([d for _, d in G.in_degree()])
-    out_degree   = np.array([d for _, d in G.out_degree()])
-    node_strength= np.sum(binary, axis=1).astype(float)
-    clustering   = np.array(list(nx.clustering(G_und).values()))
-    global_eff   = np.array([nx.global_efficiency(G_und)])
-    local_eff    = np.array([
+    degree        = np.array([d for _, d in G.degree()])
+    in_degree     = np.array([d for _, d in G.in_degree()])
+    out_degree    = np.array([d for _, d in G.out_degree()])
+    node_strength = np.sum(binary, axis=1).astype(float)
+    clustering    = np.array(list(nx.clustering(G_und).values()))
+    global_eff    = np.array([nx.global_efficiency(G_und)])
+    local_eff     = np.array([
         nx.local_efficiency(G_und.subgraph(list(G_und.neighbors(n)) + [n]))
         for n in G_und.nodes()
     ])
@@ -473,8 +476,8 @@ def build_feature_matrix(epochs, class_labels, order=5, fs=128, top_percent=0.20
     """Build dataset X, y từ tất cả epochs (hỗ trợ merged_label)."""
     X_list, y_list = [], []
 
-    # Nếu đã gộp label thì dùng metadata['merged_label']
-    use_metadata = (epochs.metadata is not None and 'merged_label' in epochs.metadata.columns)
+    use_metadata = (epochs.metadata is not None and
+                    'merged_label' in epochs.metadata.columns)
 
     for label in class_labels:
         if use_metadata:
@@ -500,12 +503,13 @@ def build_feature_matrix(epochs, class_labels, order=5, fs=128, top_percent=0.20
     return X, y
 
 
-
 # =============================================================================
-# MAIN
+# MAIN — chạy độc lập 1 subject (dùng để test)
 # =============================================================================
 
 if __name__ == "__main__":
+    import os
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # --- 1. Preprocessing ---
     raw_clean = load_and_preprocess(EDF_PATH, EEG_CHANNELS)
@@ -519,15 +523,14 @@ if __name__ == "__main__":
     channel_names = epochs.info['ch_names']
     fs            = int(epochs.info['sfreq'])
 
-    # --- 3. Gộp class Chân phải + Chân trái → "Chân" ---
+    # --- 3. Gộp Chân phải + Chân trái → "Chân" ---
     epochs = merge_epochs_labels(epochs, MERGE_LEGS)
 
     # --- 4. MVAR + dTF Connectivity (per class) ---
-    # Với class gộp ("Chân"), lấy epochs qua metadata
     results = {}
     for label in CLASS_LABELS:
         if label in MERGE_LEGS:
-            mask = epochs.metadata['merged_label'] == label
+            mask      = epochs.metadata['merged_label'] == label
             ep_subset = epochs[mask.values]
         else:
             ep_subset = epochs[label]
@@ -539,7 +542,7 @@ if __name__ == "__main__":
     # --- 5. Graph Theory ---
     graph_results = run_graph_pipeline(results, CLASS_LABELS, channel_names, OUTPUT_DIR)
 
-    # --- 6. Feature Extraction → lưu CSV (chạy classify.py để train model) ---
+    # --- 6. Feature Extraction → lưu CSV ---
     X, y = build_feature_matrix(epochs, CLASS_LABELS, order=MVAR_ORDER,
                                  fs=fs, top_percent=TOP_PERCENT)
 
@@ -558,4 +561,4 @@ if __name__ == "__main__":
     feat_path = f"{OUTPUT_DIR}graph_features_all_epochs.csv"
     feat_df.to_csv(feat_path, index=False)
     print(f"\n✅ Features saved → {feat_path}")
-    print("   Chạy classify.py để train và đánh giá các model.")
+    print("   Chạy run_all_subjects.py để train multi-subject.")
